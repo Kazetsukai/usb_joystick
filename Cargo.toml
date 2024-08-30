@@ -27,3 +27,4 @@ embassy-time = { version = "0.3.1", features = [
 panic-probe = { version = "0.3", features = ["print-defmt"] }
 pio-proc = "0.2"
 pio = "0.2.1"
+embedded-hal-async = "1.0.0"
