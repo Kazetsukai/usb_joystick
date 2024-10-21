@@ -1,0 +1,120 @@
+/* Dark Theme Stylesheet */
+
+/* Set the background color */
+body {
+  background-color: #1a1a1a;
+  color: #aadbc7;
+  font-family: 'Open Sans', sans-serif;
+}
+
+/* Add some padding and margin to the container */
+.container {
+  padding: 20px;
+  margin-top: 20px;
+  margin-bottom: 20px;
+  margin-left: auto;
+  margin-right: auto;
+  width: 50%;
+  min-width: 300px;
+  
+}
+
+.section h1 {
+  font-size: 24px;
+}
+
+.section {
+  background-color: #262626;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.section h2 {
+  font-size: 20px;
+}
+
+.button {
+  background-color: #555555;
+  color: #aadbc7;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.button:hover {
+  background-color: #777777;
+}
+
+.input {
+  background-color: #333333;
+  color: #8fb8a7;
+  padding: 10px;
+  border: none;
+  border-radius: 4px;
+}
+
+/* Colour picker */
+input[type="color"] {
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  /* Center in the line */
+  vertical-align: middle;
+}
+
+/* Toggle Button Styles */
+.toggle-button {
+  display: inline-block;
+  vertical-align: -60%;
+  width: 60px;
+  height: 30px;
+  background-color: #555555;
+  border-radius: 17px;
+  position: relative;
+  cursor: pointer;
+  border: 2px solid #333333;
+  transition: background-color 0.3s ease, border 0.3s ease;
+}
+
+.toggle-button::before {
+  content: "";
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  width: 20px;
+  height: 20px;
+  background-color: #6d6d6d;
+  border-color: #333333;
+  border-radius: 50%;
+  transform: translateX(0);
+  transition: transform 0.3s ease, background-color 0.3s ease;
+}
+
+/* Apply the toggle button styles to the boolToggle checkbox */
+#boolToggle {
+  display: none;
+}
+#boolToggle:checked + .power-button {
+  background-color: #6d6d6d;
+  border-color: #cecece;
+}
+#boolToggle:checked + .power-button::before {
+  transform: translateX(30px);
+  background-color: #31f35b;
+  border-color: #ffffff;
+}
+
+.label {
+  color: #8fb8a7;
+  font-weight: bold;
+}
+
+a {
+  color: #ffffff;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
