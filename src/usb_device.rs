@@ -1,4 +1,7 @@
 use defmt::{info, warn};
+use edge_dhcp::io::{self, DEFAULT_CLIENT_PORT, DEFAULT_SERVER_PORT};
+use edge_dhcp::server::{Server, ServerOptions};
+use edge_dhcp::Ipv4Addr;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources};
@@ -22,6 +25,7 @@ use embassy_usb::{
     control::OutResponse,
     UsbDevice,
 };
+
 use heapless::Vec;
 use picoserve::{
     extract,
@@ -183,6 +187,9 @@ pub async fn be_usb_device(
             },
         ));
     }
+    info!("Web task started");
+
+    spawner.must_spawn(dhcp_task(stack));
 
     let (reader, mut writer) = hid.split();
     let mut rng = RoscRng;
@@ -286,4 +293,21 @@ async fn usb_ncm_task(class: Runner<'static, Driver<'static, USB>, MTU>) -> ! {
 #[embassy_executor::task]
 async fn net_task(stack: &'static Stack<Device<'static, MTU>>) -> ! {
     stack.run().await
+}
+
+#[embassy_executor::task]
+async fn dhcp_task(stack: &'static Stack<Device<'static, MTU>>) -> () {
+    let mut buf = [0; 1500];
+
+    let mut gw_buf = [Ipv4Addr::UNSPECIFIED];
+    let ip = Ipv4Addr::new(10, 42, 0, 1);
+
+    return io::server::run(
+        &mut Server::<64>::new(ip),
+        &ServerOptions::new(ip, Some(&mut gw_buf)),
+        &mut stack,
+        &mut buf,
+    )
+    .await
+    .unwrap();
 }
