@@ -50,7 +50,7 @@ use usbd_hid::descriptor::SerializedDescriptor;
 
 use crate::hid_descriptor::ControlPanelReport;
 use crate::state::{AppState, SharedState};
-use crate::{Irqs, DEVICE_HOST, DEVICE_NAME};
+use crate::{Irqs, DEVICE_HOST, DEVICE_NAME, DNS_SERVERS, OUR_IP};
 use edge_nal_embassy::UdpBuffers;
 
 const MTU: usize = 1514;
@@ -160,6 +160,9 @@ pub async fn be_usb_device(
         RESOURCES.init(StackResources::<12>::new()),
         seed,
     );
+    stack
+        .join_multicast_group(Ipv4Addr::new(224, 0, 0, 251))
+        .unwrap();
 
     spawner.must_spawn(net_task(runner));
     info!("Network task started");
@@ -201,12 +204,15 @@ pub async fn be_usb_device(
     info!("Web task started");
 
     // DHCP server with no gateway, allows connected device to get an IP address when this device is plugged in.
-    spawner.must_spawn(dhcp_task(stack));
-    info!("DHCP server task started");
+    // spawner.must_spawn(dhcp_task(stack));
+    // info!("DHCP server task started");
 
     // mDNS server to allow connected device to find this device on the network.
     spawner.must_spawn(mdns_task(stack));
     info!("mDNS server task started");
+
+    // spawner.must_spawn(captive_dns_task(stack));
+    // info!("Captive DNS server task started");
 
     // Joystick bits
     let (reader, mut writer) = hid.split();
@@ -316,7 +322,7 @@ async fn net_task(mut runner: embassy_net::Runner<'static, Device<'static, MTU>>
 async fn dhcp_task(stack: Stack<'static>) -> () {
     let mut buf = [0; 1500];
 
-    let ip = Ipv4Addr::new(10, 42, 0, 1);
+    // let mut gw_buf = [Ipv4Addr::UNSPECIFIED];
 
     let buffers: UdpBuffers<1, 1500, 1500, 2> = UdpBuffers::new();
     let udp = Udp::new(stack, &buffers);
@@ -328,11 +334,38 @@ async fn dhcp_task(stack: Stack<'static>) -> () {
         .await
         .unwrap();
 
+    let options = {
+        let mut options = ServerOptions::new(OUR_IP, None);
+        options.dns = &DNS_SERVERS;
+        options
+    };
+
     return io::server::run(
-        &mut Server::<_, 2>::new_with_et(ip),
-        &ServerOptions::new(ip, None),
+        &mut Server::<_, 2>::new_with_et(OUR_IP),
+        &options,
         &mut socket,
         &mut buf,
+    )
+    .await
+    .unwrap();
+}
+
+#[embassy_executor::task]
+async fn captive_dns_task(stack: Stack<'static>) -> () {
+    let mut tx_buf: [u8; 1500] = [0; 1500];
+    let mut rx_buf: [u8; 1500] = [0; 1500];
+    let ip = Ipv4Addr::new(10, 42, 0, 1);
+
+    let buffers: UdpBuffers<3, 1500, 1500, 2> = UdpBuffers::new();
+    let udp = Udp::new(stack, &buffers);
+
+    edge_captive::io::run(
+        &udp,
+        SocketAddr::new(core::net::IpAddr::V4(ip), 53),
+        &mut tx_buf,
+        &mut rx_buf,
+        ip,
+        core::time::Duration::from_secs(60),
     )
     .await
     .unwrap();
@@ -347,7 +380,7 @@ async fn mdns_task(stack: Stack<'static>) -> () {
 
     let ip = Ipv4Addr::new(10, 42, 0, 1);
 
-    let buffers: UdpBuffers<1, 1500, 1500, 2> = UdpBuffers::new();
+    let buffers: UdpBuffers<3, 1500, 1500, 2> = UdpBuffers::new();
     let udp = Udp::new(stack, &buffers);
     let mut socket = udp.bind(IPV4_DEFAULT_SOCKET).await.unwrap();
     let (recv, send) = socket.split();
@@ -370,6 +403,8 @@ async fn mdns_task(stack: Stack<'static>) -> () {
         ipv6: Ipv6Addr::UNSPECIFIED,
         ttl: Ttl::from_secs(60),
     };
+
+    info!("Starting mDNS server");
 
     mdns.run(HostAnswersMdnsHandler::new(&host)).await.unwrap();
 }

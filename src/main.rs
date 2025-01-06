@@ -10,8 +10,11 @@ mod usb_device;
 static DEVICE_NAME: &str = "Custom Joystick";
 static DEVICE_HOST: &str = "joystick";
 
+static OUR_IP: Ipv4Addr = Ipv4Addr::new(10, 42, 0, 1);
+static DNS_SERVERS: [Ipv4Addr; 1] = [OUR_IP];
+
 use {
-    core::convert,
+    core::{convert, net::Ipv4Addr},
     defmt::*,
     defmt_rtt as _,
     embassy_executor::Spawner,
