@@ -1,17 +1,28 @@
+use core::net::{Ipv6Addr, SocketAddr, SocketAddrV4};
+
 use defmt::{info, warn};
-use edge_dhcp::io::{self, DEFAULT_CLIENT_PORT, DEFAULT_SERVER_PORT};
+use edge_dhcp::io::{self, DEFAULT_SERVER_PORT};
 use edge_dhcp::server::{Server, ServerOptions};
 use edge_dhcp::Ipv4Addr;
+use edge_mdns::buf::{BufferAccess, VecBufAccess};
+use edge_mdns::domain::base::Ttl;
+use edge_mdns::host::Host;
+use edge_mdns::io::{Mdns, DEFAULT_SOCKET, IPV4_DEFAULT_SOCKET};
+use edge_mdns::HostAnswersMdnsHandler;
+use edge_nal::{UdpBind, UdpSplit};
+use edge_nal_embassy::Udp;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources};
 use embassy_rp::{
     adc::{Adc, Channel},
     clocks::RoscRng,
-    gpio::{AnyPin, Input, Level, Output, Pull},
+    gpio::{Input, Pull},
     peripherals::{ADC, PIN_20, PIN_21, PIN_26, PIN_27, PIN_28, USB},
     usb::Driver,
 };
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::signal::{self, Signal};
 use embassy_time::{Duration, Timer};
 use embassy_usb::{
     class::{
@@ -39,7 +50,8 @@ use usbd_hid::descriptor::SerializedDescriptor;
 
 use crate::hid_descriptor::ControlPanelReport;
 use crate::state::{AppState, SharedState};
-use crate::Irqs;
+use crate::{Irqs, DEVICE_HOST, DEVICE_NAME};
+use edge_nal_embassy::UdpBuffers;
 
 const MTU: usize = 1514;
 const INDEX_HTML: &str = include_str!("../static/index.html");
@@ -66,8 +78,8 @@ pub async fn be_usb_device(
 
     let config = {
         let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
-        config.manufacturer = Some("Embassy");
-        config.product = Some("USB-Ethernet example");
+        config.manufacturer = Some("Kaze");
+        config.product = Some(DEVICE_NAME);
         config.serial_number = Some("12345678");
         config.max_power = 100;
         config.max_packet_size_0 = 64;
@@ -141,16 +153,15 @@ pub async fn be_usb_device(
     let seed = rng.next_u64();
 
     // Init network stack
-    static STACK: StaticCell<Stack<Device<'static, MTU>>> = StaticCell::new();
     static RESOURCES: StaticCell<StackResources<12>> = StaticCell::new();
-    let stack = &*STACK.init(Stack::new(
+    let (stack, runner) = embassy_net::new(
         device,
         config,
         RESOURCES.init(StackResources::<12>::new()),
         seed,
-    ));
+    );
 
-    spawner.must_spawn(net_task(stack));
+    spawner.must_spawn(net_task(runner));
     info!("Network task started");
 
     async fn get_state(
@@ -189,10 +200,16 @@ pub async fn be_usb_device(
     }
     info!("Web task started");
 
+    // DHCP server with no gateway, allows connected device to get an IP address when this device is plugged in.
     spawner.must_spawn(dhcp_task(stack));
+    info!("DHCP server task started");
 
+    // mDNS server to allow connected device to find this device on the network.
+    spawner.must_spawn(mdns_task(stack));
+    info!("mDNS server task started");
+
+    // Joystick bits
     let (reader, mut writer) = hid.split();
-    let mut rng = RoscRng;
 
     let mut adc = Adc::new(adc, Irqs, embassy_rp::adc::Config::default());
     let mut vx_analog = Channel::new_pin(pin_vx, Pull::None);
@@ -256,7 +273,7 @@ const WEB_TASK_POOL_SIZE: usize = 3;
 #[embassy_executor::task(pool_size = WEB_TASK_POOL_SIZE)]
 async fn web_task(
     id: usize,
-    stack: &'static Stack<Device<'static, MTU>>,
+    stack: Stack<'static>,
     app: &'static Router<AppRouter, AppState>,
     config: &'static picoserve::Config<Duration>,
     state: AppState,
@@ -291,23 +308,68 @@ async fn usb_ncm_task(class: Runner<'static, Driver<'static, USB>, MTU>) -> ! {
 }
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<Device<'static, MTU>>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, Device<'static, MTU>>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::task]
-async fn dhcp_task(stack: &'static Stack<Device<'static, MTU>>) -> () {
+async fn dhcp_task(stack: Stack<'static>) -> () {
     let mut buf = [0; 1500];
 
-    let mut gw_buf = [Ipv4Addr::UNSPECIFIED];
     let ip = Ipv4Addr::new(10, 42, 0, 1);
 
+    let buffers: UdpBuffers<1, 1500, 1500, 2> = UdpBuffers::new();
+    let udp = Udp::new(stack, &buffers);
+    let mut socket = udp
+        .bind(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::new(0, 0, 0, 0),
+            DEFAULT_SERVER_PORT,
+        )))
+        .await
+        .unwrap();
+
     return io::server::run(
-        &mut Server::<64>::new(ip),
-        &ServerOptions::new(ip, Some(&mut gw_buf)),
-        &mut stack,
+        &mut Server::<_, 2>::new_with_et(ip),
+        &ServerOptions::new(ip, None),
+        &mut socket,
         &mut buf,
     )
     .await
     .unwrap();
+}
+
+#[embassy_executor::task]
+async fn mdns_task(stack: Stack<'static>) -> () {
+    let (recv_buf, send_buf) = (
+        VecBufAccess::<NoopRawMutex, 1500>::new(),
+        VecBufAccess::<NoopRawMutex, 1500>::new(),
+    );
+
+    let ip = Ipv4Addr::new(10, 42, 0, 1);
+
+    let buffers: UdpBuffers<1, 1500, 1500, 2> = UdpBuffers::new();
+    let udp = Udp::new(stack, &buffers);
+    let mut socket = udp.bind(IPV4_DEFAULT_SOCKET).await.unwrap();
+    let (recv, send) = socket.split();
+
+    let signal = Signal::<NoopRawMutex, ()>::new();
+    let mdns = Mdns::new(
+        Some(Ipv4Address::UNSPECIFIED),
+        None,
+        recv,
+        send,
+        &recv_buf,
+        &send_buf,
+        |arr| RoscRng.fill_bytes(arr),
+        &signal,
+    );
+
+    let host = Host {
+        hostname: DEVICE_HOST,
+        ipv4: ip,
+        ipv6: Ipv6Addr::UNSPECIFIED,
+        ttl: Ttl::from_secs(60),
+    };
+
+    mdns.run(HostAnswersMdnsHandler::new(&host)).await.unwrap();
 }
