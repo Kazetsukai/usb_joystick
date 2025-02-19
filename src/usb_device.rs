@@ -1,4 +1,5 @@
 use core::net::{Ipv6Addr, SocketAddr, SocketAddrV4};
+use core::pin;
 
 use defmt::{info, warn};
 use edge_dhcp::io::{self, DEFAULT_SERVER_PORT};
@@ -14,11 +15,14 @@ use edge_nal_embassy::Udp;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources};
+use embassy_rp::gpio::{Level, Output};
 use embassy_rp::{
     adc::{Adc, Channel},
     clocks::RoscRng,
     gpio::{Input, Pull},
-    peripherals::{ADC, PIN_20, PIN_21, PIN_26, PIN_27, PIN_28, USB},
+    peripherals::{
+        ADC, PIN_2, PIN_20, PIN_21, PIN_26, PIN_27, PIN_28, PIN_3, PIN_4, PIN_5, PIN_6, PIN_7, USB,
+    },
     usb::Driver,
 };
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -39,13 +43,14 @@ use embassy_usb::{
 
 use heapless::Vec;
 use picoserve::{
-    extract,
+    extract, make_static,
     response::{json, File, IntoResponse},
     routing::{get, get_service},
     Router,
 };
+use picoserve::{AppBuilder, AppRouter, AppWithStateBuilder};
 use rand::{Rng, RngCore};
-use static_cell::{make_static, StaticCell};
+use static_cell::StaticCell;
 use usbd_hid::descriptor::SerializedDescriptor;
 
 use crate::hid_descriptor::ControlPanelReport;
@@ -58,7 +63,26 @@ const INDEX_HTML: &str = include_str!("../static/index.html");
 const STYLE_CSS: &str = include_str!("../static/style.css");
 const SCRIPT_JS: &str = include_str!("../static/script.js");
 
-type AppRouter = impl picoserve::routing::PathRouter<AppState>;
+struct AppProps;
+
+async fn get_state(
+    extract::State(SharedState(leds)): extract::State<SharedState>,
+) -> impl IntoResponse {
+    json::Json(*leds.lock().await)
+}
+
+impl AppWithStateBuilder for AppProps {
+    type State = AppState;
+    type PathRouter = impl picoserve::routing::PathRouter<AppState>;
+
+    fn build_app(self) -> picoserve::Router<Self::PathRouter, Self::State> {
+        picoserve::Router::new()
+            .route("/", get_service(File::html(INDEX_HTML)))
+            .route("/style.css", get_service(File::css(STYLE_CSS)))
+            .route("/script.js", get_service(File::javascript(SCRIPT_JS)))
+            .route("/state", get(get_state))
+    }
+}
 
 #[embassy_executor::task]
 pub async fn be_usb_device(
@@ -71,6 +95,12 @@ pub async fn be_usb_device(
     pin_vz: PIN_28,
     pin_s1: PIN_20,
     pin_s2: PIN_21,
+    pin_2: PIN_2,
+    pin_3: PIN_3,
+    pin_4: PIN_4,
+    pin_5: PIN_5,
+    pin_6: PIN_6,
+    pin_7: PIN_7,
 ) {
     info!("USB device task started");
     let driver = Driver::new(usb, Irqs);
@@ -167,28 +197,17 @@ pub async fn be_usb_device(
     spawner.must_spawn(net_task(runner));
     info!("Network task started");
 
-    async fn get_state(
-        extract::State(SharedState(leds)): extract::State<SharedState>,
-    ) -> impl IntoResponse {
-        json::Json(*leds.lock().await)
-    }
+    let app = make_static!(AppRouter<AppProps>, AppProps.build_app());
 
-    fn make_app() -> Router<AppRouter, AppState> {
-        picoserve::Router::new()
-            .route("/", get_service(File::html(INDEX_HTML)))
-            .route("/style.css", get_service(File::css(STYLE_CSS)))
-            .route("/script.js", get_service(File::javascript(SCRIPT_JS)))
-            .route("/state", get(get_state))
-    }
-
-    let app = make_static!(make_app());
-
-    let config = make_static!(picoserve::Config::new(picoserve::Timeouts {
-        start_read_request: Some(Duration::from_secs(5)),
-        read_request: Some(Duration::from_secs(1)),
-        write: Some(Duration::from_secs(1)),
-    })
-    .keep_connection_alive());
+    let config = make_static!(
+        picoserve::Config<Duration>,
+        picoserve::Config::new(picoserve::Timeouts {
+            start_read_request: Some(Duration::from_secs(5)),
+            read_request: Some(Duration::from_secs(1)),
+            write: Some(Duration::from_secs(1)),
+        })
+        .keep_connection_alive()
+    );
 
     for id in 0..WEB_TASK_POOL_SIZE {
         spawner.must_spawn(web_task(
@@ -224,7 +243,16 @@ pub async fn be_usb_device(
     let mut s1 = Input::new(pin_s1, Pull::Up);
     let mut s2 = Input::new(pin_s2, Pull::Up);
 
+    let mut led_0 = Output::new(pin_2, Level::Low);
+    let mut led_1 = Output::new(pin_3, Level::Low);
+    let mut led_2 = Output::new(pin_4, Level::Low);
+    let mut led_3 = Output::new(pin_5, Level::Low);
+    let mut led_4 = Output::new(pin_6, Level::Low);
+    let mut led_5 = Output::new(pin_7, Level::Low);
+
     Timer::after_secs(1).await;
+
+    let mut counter: u16 = 0;
 
     let in_fut = async {
         loop {
@@ -241,6 +269,39 @@ pub async fn be_usb_device(
             match writer.write_serialize(&report).await {
                 Ok(()) => {}
                 Err(e) => warn!("Failed to send report: {:?}", e),
+            }
+
+            // Update the LEDs.
+            counter = counter.wrapping_add(1);
+            if (counter & 0b00000100) != 0 {
+                led_0.set_high();
+            } else {
+                led_0.set_low();
+            }
+            if (counter & 0b00001000) != 0 {
+                led_1.set_high();
+            } else {
+                led_1.set_low();
+            }
+            if (counter & 0b00010000) != 0 {
+                led_2.set_high();
+            } else {
+                led_2.set_low();
+            }
+            if (counter & 0b00100000) != 0 {
+                led_3.set_high();
+            } else {
+                led_3.set_low();
+            }
+            if (counter & 0b01000000) != 0 {
+                led_4.set_high();
+            } else {
+                led_4.set_low();
+            }
+            if (counter & 0b10000000) != 0 {
+                led_5.set_high();
+            } else {
+                led_5.set_low();
             }
         }
     };
@@ -280,7 +341,7 @@ const WEB_TASK_POOL_SIZE: usize = 3;
 async fn web_task(
     id: usize,
     stack: Stack<'static>,
-    app: &'static Router<AppRouter, AppState>,
+    app: &'static AppRouter<AppProps>,
     config: &'static picoserve::Config<Duration>,
     state: AppState,
 ) -> ! {

@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 #![feature(impl_trait_in_assoc_type)]
 
 mod hid_descriptor;
@@ -25,11 +24,14 @@ use {
         peripherals::{ADC, I2C1, USB},
         usb,
     },
-    embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex},
+    embassy_sync::{
+        blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex},
+        mutex::Mutex,
+    },
     embassy_time::{Duration, Timer},
     embedded_hal_async::i2c::I2c,
     panic_probe as _,
-    static_cell::make_static,
+    picoserve::make_static,
 };
 
 bind_interrupts!(struct Irqs {
@@ -45,7 +47,10 @@ async fn main(spawner: Spawner) {
 
     let _ = spawner.spawn(blinker(led, Duration::from_millis(500)));
 
-    let shared_state = make_static!(state::SharedState(make_static!(Mutex::new(true))));
+    let shared_state = make_static!(
+        state::SharedState,
+        state::SharedState(make_static!(Mutex<CriticalSectionRawMutex, bool>, Mutex::new(true)))
+    );
 
     Timer::after_millis(100).await;
 
@@ -60,12 +65,18 @@ async fn main(spawner: Spawner) {
             p.PIN_28,
             p.PIN_20,
             p.PIN_21,
+            p.PIN_2,
+            p.PIN_3,
+            p.PIN_4,
+            p.PIN_5,
+            p.PIN_6,
+            p.PIN_7,
         ))
         .unwrap();
 }
 
 #[embassy_executor::task]
-async fn blinker(mut led: Output<'static, AnyPin>, interval: Duration) {
+async fn blinker(mut led: Output<'static>, interval: Duration) {
     loop {
         led.set_high();
         Timer::after(interval).await;
