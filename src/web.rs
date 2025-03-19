@@ -1,9 +1,10 @@
 use embassy_net::Stack;
 use embassy_time::Duration;
 use picoserve::{
-    extract, make_static,
+    extract::{self, State},
+    make_static,
     response::{json, File, IntoResponse},
-    routing::{get, get_service, PathRouter},
+    routing::{get, get_service, post, PathRouter},
     AppRouter, AppWithStateBuilder, Config, Router,
 };
 
@@ -16,9 +17,9 @@ const SCRIPT_JS: &str = include_str!("../static/script.js");
 pub struct AppProps;
 
 pub async fn get_state(
-    extract::State(SharedState(leds)): extract::State<SharedState>,
+    extract::State(SharedState(power)): extract::State<SharedState>,
 ) -> impl IntoResponse {
-    json::Json(*leds.lock().await)
+    json::Json(*power.lock().await)
 }
 
 impl AppWithStateBuilder for AppProps {
@@ -31,6 +32,14 @@ impl AppWithStateBuilder for AppProps {
             .route("/style.css", get_service(File::css(STYLE_CSS)))
             .route("/script.js", get_service(File::javascript(SCRIPT_JS)))
             .route("/state", get(get_state))
+            .route(
+                "/power",
+                post(|State(SharedState(power)): State<SharedState>| async {
+                    let mut guard = power.lock().await;
+                    *guard = !*guard;
+                    json::Json(*guard)
+                }),
+            )
     }
 }
 

@@ -111,7 +111,7 @@ async fn main(spawner: Spawner) {
             id,
             stack,
             AppState {
-                shared_state: *shared_state,
+                power_state: *shared_state,
             },
             app,
             config,
