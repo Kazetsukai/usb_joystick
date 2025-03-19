@@ -84,6 +84,7 @@ async fn main(spawner: Spawner) {
         p.PIN_5,
         p.PIN_6,
         p.PIN_7,
+        shared_state,
     );
     let usb = builder.build();
     let (app, config) = web::make_web_app();

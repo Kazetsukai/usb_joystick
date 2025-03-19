@@ -70,6 +70,7 @@ where
     led_4: Output<'static>,
     led_5: Output<'static>,
     writer: HidWriter<'static, D, 8>,
+    state: &'static crate::state::SharedState,
 }
 impl<D: Driver<'static>> JoystickRunner<D> {
     pub async fn run(&mut self) -> ! {
@@ -95,7 +96,11 @@ impl<D: Driver<'static>> JoystickRunner<D> {
             }
 
             // Update the LEDs.
-            counter = counter.wrapping_add(1);
+            if (*self.state.0.lock().await) {
+                counter = counter.wrapping_add(1);
+            } else {
+                counter = 0;
+            }
             if (counter & 0b00000100) != 0 {
                 self.led_0.set_high();
             } else {
@@ -144,6 +149,7 @@ pub(crate) fn make_joystick<D>(
     pin_led3: impl Pin,
     pin_led4: impl Pin,
     pin_led5: impl Pin,
+    state: &'static crate::state::SharedState,
 ) -> (JoystickRunner<D>, HidResponderRunner<'static, D>)
 where
     D: Driver<'static>,
@@ -190,6 +196,7 @@ where
         led_4,
         led_5,
         writer,
+        state,
     };
 
     let responder = HidResponderRunner { reader };
