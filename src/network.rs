@@ -10,15 +10,46 @@ use edge_mdns::io::{Mdns, IPV4_DEFAULT_SOCKET};
 use edge_mdns::HostAnswersMdnsHandler;
 use edge_nal::{UdpBind, UdpSplit};
 use edge_nal_embassy::{Udp, UdpBuffers};
-use embassy_net::{Ipv4Address, Stack};
+use embassy_net::driver::Driver;
+use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources};
 use embassy_rp::clocks::RoscRng;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
+use heapless::Vec;
 use rand::RngCore;
+use static_cell::StaticCell;
 
 use crate::{DEVICE_HOST, DNS_SERVERS, OUR_IP};
 
 const MTU: usize = 1514;
+
+pub fn make_network_stack<D>(
+    net_driver: D,
+    rnd_seed: u64,
+) -> (embassy_net::Runner<'static, D>, Stack<'static>)
+where
+    D: Driver,
+{
+    let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
+        address: Ipv4Cidr::new(Ipv4Address::new(10, 42, 0, 1), 24),
+        dns_servers: Vec::new(),
+        gateway: None,
+    });
+
+    // Init network stack
+    static RESOURCES: StaticCell<StackResources<12>> = StaticCell::new();
+    let (stack, runner) = embassy_net::new(
+        net_driver,
+        config,
+        RESOURCES.init(StackResources::<12>::new()),
+        rnd_seed,
+    );
+    stack
+        .join_multicast_group(Ipv4Addr::new(224, 0, 0, 251))
+        .unwrap();
+
+    (runner, stack)
+}
 
 #[embassy_executor::task]
 pub async fn dhcp_task(stack: Stack<'static>) -> () {

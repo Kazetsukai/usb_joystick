@@ -1,10 +1,10 @@
 use embassy_net::Stack;
 use embassy_time::Duration;
 use picoserve::{
-    extract,
+    extract, make_static,
     response::{json, File, IntoResponse},
-    routing::{get, get_service},
-    AppRouter, AppWithStateBuilder,
+    routing::{get, get_service, PathRouter},
+    AppRouter, AppWithStateBuilder, Config, Router,
 };
 
 use crate::state::{AppState, SharedState};
@@ -34,15 +34,33 @@ impl AppWithStateBuilder for AppProps {
     }
 }
 
-pub(crate) const WEB_TASK_POOL_SIZE: usize = 3;
+pub fn make_web_app() -> (
+    &'static AppRouter<AppProps>,
+    &'static picoserve::Config<embassy_time::Duration>,
+) {
+    // Setup web app
+    let app = make_static!(AppRouter<AppProps>, AppProps.build_app());
+    let config = make_static!(
+        picoserve::Config<embassy_time::Duration>,
+        picoserve::Config::new(picoserve::Timeouts {
+            start_read_request: Some(embassy_time::Duration::from_secs(5)),
+            read_request: Some(embassy_time::Duration::from_secs(1)),
+            write: Some(embassy_time::Duration::from_secs(1)),
+        })
+        .keep_connection_alive()
+    );
 
+    (app, config)
+}
+
+pub(crate) const WEB_TASK_POOL_SIZE: usize = 3;
 #[embassy_executor::task(pool_size = WEB_TASK_POOL_SIZE)]
 pub async fn web_task(
     id: usize,
     stack: Stack<'static>,
-    app: &'static AppRouter<AppProps>,
-    config: &'static picoserve::Config<Duration>,
     state: AppState,
+    app: &'static AppRouter<AppProps>,
+    config: &'static Config<Duration>,
 ) -> ! {
     let port = 80;
     let mut tcp_rx_buffer = [0; 1024];
