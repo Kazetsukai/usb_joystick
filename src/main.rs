@@ -3,8 +3,11 @@
 #![feature(impl_trait_in_assoc_type)]
 
 mod hid_descriptor;
+mod joystick;
+mod network;
 mod state;
 mod usb_device;
+mod web;
 
 static DEVICE_NAME: &str = "Custom Joystick";
 static DEVICE_HOST: &str = "joystick";
@@ -13,23 +16,18 @@ static OUR_IP: Ipv4Addr = Ipv4Addr::new(10, 42, 0, 1);
 static DNS_SERVERS: [Ipv4Addr; 1] = [OUR_IP];
 
 use {
-    core::{convert, net::Ipv4Addr},
-    defmt::*,
+    core::net::Ipv4Addr,
     defmt_rtt as _,
     embassy_executor::Spawner,
     embassy_rp::{
         adc, bind_interrupts,
         gpio::{AnyPin, Level, Output},
-        i2c::{self, Config, InterruptHandler},
-        peripherals::{ADC, I2C1, USB},
+        i2c::InterruptHandler,
+        peripherals::{I2C1, USB},
         usb,
     },
-    embassy_sync::{
-        blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex},
-        mutex::Mutex,
-    },
+    embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex},
     embassy_time::{Duration, Timer},
-    embedded_hal_async::i2c::I2c,
     panic_probe as _,
     picoserve::make_static,
 };

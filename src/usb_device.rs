@@ -1,20 +1,8 @@
-use core::net::{Ipv6Addr, SocketAddr, SocketAddrV4};
-use core::pin;
-
-use defmt::{info, warn};
-use edge_dhcp::io::{self, DEFAULT_SERVER_PORT};
-use edge_dhcp::server::{Server, ServerOptions};
+use defmt::info;
 use edge_dhcp::Ipv4Addr;
-use edge_mdns::buf::{BufferAccess, VecBufAccess};
-use edge_mdns::domain::base::Ttl;
-use edge_mdns::host::Host;
-use edge_mdns::io::{Mdns, DEFAULT_SOCKET, IPV4_DEFAULT_SOCKET};
-use edge_mdns::HostAnswersMdnsHandler;
-use edge_nal::{UdpBind, UdpSplit};
-use edge_nal_embassy::Udp;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources};
+use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::{
     adc::{Adc, Channel},
@@ -25,9 +13,7 @@ use embassy_rp::{
     },
     usb::Driver,
 };
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::signal::{self, Signal};
-use embassy_time::{Duration, Timer};
+use embassy_time::Timer;
 use embassy_usb::{
     class::{
         cdc_ncm::{
@@ -35,9 +21,8 @@ use embassy_usb::{
             embassy_net::{Device, Runner, State as NetState},
             CdcNcmClass,
         },
-        hid::{self, HidReaderWriter, ReportId, RequestHandler},
+        hid::{self, HidReaderWriter},
     },
-    control::OutResponse,
     UsbDevice,
 };
 
@@ -46,17 +31,15 @@ use picoserve::{
     extract, make_static,
     response::{json, File, IntoResponse},
     routing::{get, get_service},
-    Router,
 };
-use picoserve::{AppBuilder, AppRouter, AppWithStateBuilder};
-use rand::{Rng, RngCore};
+use picoserve::{AppRouter, AppWithStateBuilder};
+use rand::RngCore;
 use static_cell::StaticCell;
 use usbd_hid::descriptor::SerializedDescriptor;
 
 use crate::hid_descriptor::ControlPanelReport;
 use crate::state::{AppState, SharedState};
-use crate::{Irqs, DEVICE_HOST, DEVICE_NAME, DNS_SERVERS, OUR_IP};
-use edge_nal_embassy::UdpBuffers;
+use crate::{joystick, network, web, Irqs, DEVICE_NAME};
 
 const MTU: usize = 1514;
 const INDEX_HTML: &str = include_str!("../static/index.html");
@@ -194,27 +177,27 @@ pub async fn be_usb_device(
         .join_multicast_group(Ipv4Addr::new(224, 0, 0, 251))
         .unwrap();
 
-    spawner.must_spawn(net_task(runner));
+    spawner.must_spawn(network::net_task(runner));
     info!("Network task started");
 
-    let app = make_static!(AppRouter<AppProps>, AppProps.build_app());
-
-    let config = make_static!(
-        picoserve::Config<Duration>,
+    // Setup web app
+    let app = make_static!(AppRouter<web::AppProps>, web::AppProps.build_app());
+    let web_config = make_static!(
+        picoserve::Config<embassy_time::Duration>,
         picoserve::Config::new(picoserve::Timeouts {
-            start_read_request: Some(Duration::from_secs(5)),
-            read_request: Some(Duration::from_secs(1)),
-            write: Some(Duration::from_secs(1)),
+            start_read_request: Some(embassy_time::Duration::from_secs(5)),
+            read_request: Some(embassy_time::Duration::from_secs(1)),
+            write: Some(embassy_time::Duration::from_secs(1)),
         })
         .keep_connection_alive()
     );
 
-    for id in 0..WEB_TASK_POOL_SIZE {
-        spawner.must_spawn(web_task(
+    for id in 0..web::WEB_TASK_POOL_SIZE {
+        spawner.must_spawn(web::web_task(
             id,
             stack,
             app,
-            config,
+            web_config,
             AppState {
                 shared_state: *state,
             },
@@ -222,146 +205,42 @@ pub async fn be_usb_device(
     }
     info!("Web task started");
 
-    // DHCP server with no gateway, allows connected device to get an IP address when this device is plugged in.
-    // spawner.must_spawn(dhcp_task(stack));
-    // info!("DHCP server task started");
+    // Spawn network service tasks
+    spawner.must_spawn(network::dhcp_task(stack));
+    info!("DHCP server task started");
 
-    // mDNS server to allow connected device to find this device on the network.
-    spawner.must_spawn(mdns_task(stack));
+    spawner.must_spawn(network::mdns_task(stack));
     info!("mDNS server task started");
 
-    // spawner.must_spawn(captive_dns_task(stack));
-    // info!("Captive DNS server task started");
+    // Joystick setup
+    let (reader, writer) = hid.split();
 
-    // Joystick bits
-    let (reader, mut writer) = hid.split();
+    let adc = Adc::new(adc, Irqs, embassy_rp::adc::Config::default());
+    let vx_analog = Channel::new_pin(pin_vx, Pull::None);
+    let vy_analog = Channel::new_pin(pin_vy, Pull::None);
+    let vz_analog = Channel::new_pin(pin_vz, Pull::None);
+    let s1 = Input::new(pin_s1, Pull::Up);
+    let s2 = Input::new(pin_s2, Pull::Up);
 
-    let mut adc = Adc::new(adc, Irqs, embassy_rp::adc::Config::default());
-    let mut vx_analog = Channel::new_pin(pin_vx, Pull::None);
-    let mut vy_analog = Channel::new_pin(pin_vy, Pull::None);
-    let mut vz_analog = Channel::new_pin(pin_vz, Pull::None);
-    let mut s1 = Input::new(pin_s1, Pull::Up);
-    let mut s2 = Input::new(pin_s2, Pull::Up);
-
-    let mut led_0 = Output::new(pin_2, Level::Low);
-    let mut led_1 = Output::new(pin_3, Level::Low);
-    let mut led_2 = Output::new(pin_4, Level::Low);
-    let mut led_3 = Output::new(pin_5, Level::Low);
-    let mut led_4 = Output::new(pin_6, Level::Low);
-    let mut led_5 = Output::new(pin_7, Level::Low);
+    let led_0 = Output::new(pin_2, Level::Low);
+    let led_1 = Output::new(pin_3, Level::Low);
+    let led_2 = Output::new(pin_4, Level::Low);
+    let led_3 = Output::new(pin_5, Level::Low);
+    let led_4 = Output::new(pin_6, Level::Low);
+    let led_5 = Output::new(pin_7, Level::Low);
 
     Timer::after_secs(1).await;
 
-    let mut counter: u16 = 0;
+    let joystick_fut = joystick::handle_joystick(
+        adc, vx_analog, vy_analog, vz_analog, s1, s2, led_0, led_1, led_2, led_3, led_4, led_5,
+        writer,
+    );
 
-    let in_fut = async {
-        loop {
-            _ = Timer::after_millis(1).await;
-            let report = ControlPanelReport {
-                x: -((adc.read(&mut vy_analog).await.unwrap_or_default() / 16) as i16 - 128) as i8,
-                y: ((adc.read(&mut vx_analog).await.unwrap_or_default() / 16) as i16 - 128) as i8,
-                x2: -((adc.read(&mut vz_analog).await.unwrap_or_default() / 16) as i16 - 128) as i8,
-                y2: 0,
-                s1: if s1.is_low() { 0 } else { 255 },
-                s2: if s2.is_low() { 0 } else { 255 },
-            };
-            // Send the report.
-            match writer.write_serialize(&report).await {
-                Ok(()) => {}
-                Err(e) => warn!("Failed to send report: {:?}", e),
-            }
-
-            // Update the LEDs.
-            counter = counter.wrapping_add(1);
-            if (counter & 0b00000100) != 0 {
-                led_0.set_high();
-            } else {
-                led_0.set_low();
-            }
-            if (counter & 0b00001000) != 0 {
-                led_1.set_high();
-            } else {
-                led_1.set_low();
-            }
-            if (counter & 0b00010000) != 0 {
-                led_2.set_high();
-            } else {
-                led_2.set_low();
-            }
-            if (counter & 0b00100000) != 0 {
-                led_3.set_high();
-            } else {
-                led_3.set_low();
-            }
-            if (counter & 0b01000000) != 0 {
-                led_4.set_high();
-            } else {
-                led_4.set_low();
-            }
-            if (counter & 0b10000000) != 0 {
-                led_5.set_high();
-            } else {
-                led_5.set_low();
-            }
-        }
-    };
-    let out_fut = async {
-        reader.run(true, &mut MyRequestHandler {}).await;
+    let hid_reader_fut = async {
+        reader.run(true, &mut joystick::MyRequestHandler {}).await;
     };
 
-    join(in_fut, out_fut).await;
-}
-
-struct MyRequestHandler {}
-
-impl RequestHandler for MyRequestHandler {
-    fn get_report(&mut self, id: ReportId, _buf: &mut [u8]) -> Option<usize> {
-        info!("Get report for {:?}", id);
-        None
-    }
-
-    fn set_report(&mut self, id: ReportId, data: &[u8]) -> OutResponse {
-        info!("Set report for {:?}: {=[u8]}", id, data);
-        OutResponse::Accepted
-    }
-
-    fn set_idle_ms(&mut self, id: Option<ReportId>, dur: u32) {
-        info!("Set idle rate for {:?} to {:?}", id, dur);
-    }
-
-    fn get_idle_ms(&mut self, id: Option<ReportId>) -> Option<u32> {
-        info!("Get idle rate for {:?}", id);
-        None
-    }
-}
-
-const WEB_TASK_POOL_SIZE: usize = 3;
-
-#[embassy_executor::task(pool_size = WEB_TASK_POOL_SIZE)]
-async fn web_task(
-    id: usize,
-    stack: Stack<'static>,
-    app: &'static AppRouter<AppProps>,
-    config: &'static picoserve::Config<Duration>,
-    state: AppState,
-) -> ! {
-    let port = 80;
-    let mut tcp_rx_buffer = [0; 1024];
-    let mut tcp_tx_buffer = [0; 1024];
-    let mut http_buffer = [0; 2048];
-
-    picoserve::listen_and_serve_with_state(
-        id,
-        app,
-        config,
-        stack,
-        port,
-        &mut tcp_rx_buffer,
-        &mut tcp_tx_buffer,
-        &mut http_buffer,
-        &state,
-    )
-    .await
+    join(joystick_fut, hid_reader_fut).await;
 }
 
 #[embassy_executor::task]
@@ -377,95 +256,4 @@ async fn usb_ncm_task(class: Runner<'static, Driver<'static, USB>, MTU>) -> ! {
 #[embassy_executor::task]
 async fn net_task(mut runner: embassy_net::Runner<'static, Device<'static, MTU>>) -> ! {
     runner.run().await
-}
-
-#[embassy_executor::task]
-async fn dhcp_task(stack: Stack<'static>) -> () {
-    let mut buf = [0; 1500];
-
-    // let mut gw_buf = [Ipv4Addr::UNSPECIFIED];
-
-    let buffers: UdpBuffers<1, 1500, 1500, 2> = UdpBuffers::new();
-    let udp = Udp::new(stack, &buffers);
-    let mut socket = udp
-        .bind(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::new(0, 0, 0, 0),
-            DEFAULT_SERVER_PORT,
-        )))
-        .await
-        .unwrap();
-
-    let options = {
-        let mut options = ServerOptions::new(OUR_IP, None);
-        options.dns = &DNS_SERVERS;
-        options
-    };
-
-    return io::server::run(
-        &mut Server::<_, 2>::new_with_et(OUR_IP),
-        &options,
-        &mut socket,
-        &mut buf,
-    )
-    .await
-    .unwrap();
-}
-
-#[embassy_executor::task]
-async fn captive_dns_task(stack: Stack<'static>) -> () {
-    let mut tx_buf: [u8; 1500] = [0; 1500];
-    let mut rx_buf: [u8; 1500] = [0; 1500];
-    let ip = Ipv4Addr::new(10, 42, 0, 1);
-
-    let buffers: UdpBuffers<3, 1500, 1500, 2> = UdpBuffers::new();
-    let udp = Udp::new(stack, &buffers);
-
-    edge_captive::io::run(
-        &udp,
-        SocketAddr::new(core::net::IpAddr::V4(ip), 53),
-        &mut tx_buf,
-        &mut rx_buf,
-        ip,
-        core::time::Duration::from_secs(60),
-    )
-    .await
-    .unwrap();
-}
-
-#[embassy_executor::task]
-async fn mdns_task(stack: Stack<'static>) -> () {
-    let (recv_buf, send_buf) = (
-        VecBufAccess::<NoopRawMutex, 1500>::new(),
-        VecBufAccess::<NoopRawMutex, 1500>::new(),
-    );
-
-    let ip = Ipv4Addr::new(10, 42, 0, 1);
-
-    let buffers: UdpBuffers<3, 1500, 1500, 2> = UdpBuffers::new();
-    let udp = Udp::new(stack, &buffers);
-    let mut socket = udp.bind(IPV4_DEFAULT_SOCKET).await.unwrap();
-    let (recv, send) = socket.split();
-
-    let signal = Signal::<NoopRawMutex, ()>::new();
-    let mdns = Mdns::new(
-        Some(Ipv4Address::UNSPECIFIED),
-        None,
-        recv,
-        send,
-        &recv_buf,
-        &send_buf,
-        |arr| RoscRng.fill_bytes(arr),
-        &signal,
-    );
-
-    let host = Host {
-        hostname: DEVICE_HOST,
-        ipv4: ip,
-        ipv6: Ipv6Addr::UNSPECIFIED,
-        ttl: Ttl::from_secs(60),
-    };
-
-    info!("Starting mDNS server");
-
-    mdns.run(HostAnswersMdnsHandler::new(&host)).await.unwrap();
 }

@@ -1,5 +1,4 @@
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use serde::{ser::SerializeTuple, Serialize};
 
 #[derive(Clone, Copy)]
 pub struct SharedState(pub &'static Mutex<CriticalSectionRawMutex, bool>);
