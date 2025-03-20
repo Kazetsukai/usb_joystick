@@ -95,11 +95,11 @@ input[type="color"] {
 #boolToggle {
   display: none;
 }
-#boolToggle:checked + .power-button {
+#boolToggle:checked + .toggle-button {
   background-color: #6d6d6d;
   border-color: #cecece;
 }
-#boolToggle:checked + .power-button::before {
+#boolToggle:checked + .toggle-button::before {
   transform: translateX(30px);
   background-color: #31f35b;
   border-color: #ffffff;

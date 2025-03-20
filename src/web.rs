@@ -4,8 +4,8 @@ use picoserve::{
     extract::{self, State},
     make_static,
     response::{json, File, IntoResponse},
-    routing::{get, get_service, post, PathRouter},
-    AppRouter, AppWithStateBuilder, Config, Router,
+    routing::{get, get_service, post},
+    AppRouter, AppWithStateBuilder, Config,
 };
 
 use crate::state::{AppState, SharedState};
