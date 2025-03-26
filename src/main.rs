@@ -38,7 +38,7 @@ use {
     panic_probe as _,
     picoserve::make_static,
     rand::RngCore,
-    state::AppState,
+    state::{AppState, SharedState},
 };
 
 bind_interrupts!(struct Irqs {
@@ -52,10 +52,7 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let led = Output::new(AnyPin::from(p.PIN_22), Level::Low);
 
-    let shared_state = make_static!(
-        state::SharedState,
-        state::SharedState(make_static!(Mutex<CriticalSectionRawMutex, bool>, Mutex::new(true)))
-    );
+    let shared_state = make_static!(Mutex<CriticalSectionRawMutex, SharedState>, Mutex::new(SharedState { power: true }));
 
     Timer::after_millis(100).await;
 
@@ -64,8 +61,6 @@ async fn main(spawner: Spawner) {
     let seed = rng.next_u64();
 
     let usb_driver = Driver::new(p.USB, Irqs);
-
-    //spawner.must_spawn(usb_device::be_usb_device(spawner, shared_state));
 
     let mut builder = usb_device::get_usb_builder(usb_driver);
     let (ncm_runner, device) = usb_ethernet::make_usb_ethernet_device(&mut builder);
@@ -112,7 +107,7 @@ async fn main(spawner: Spawner) {
             id,
             stack,
             AppState {
-                power_state: *shared_state,
+                shared: state::SharedStateMutex(shared_state),
             },
             app,
             config,

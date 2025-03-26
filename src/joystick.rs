@@ -3,6 +3,7 @@ use embassy_rp::{
     adc::{Adc, AdcPin, Async, Channel},
     gpio::{Input, Level, Output, Pin, Pull},
 };
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::Timer;
 use embassy_usb::{
     class::hid::{self, HidReader, HidReaderWriter},
@@ -16,7 +17,7 @@ use embassy_usb::{
 use static_cell::StaticCell;
 use usbd_hid::descriptor::SerializedDescriptor;
 
-use crate::hid_descriptor::ControlPanelReport;
+use crate::{hid_descriptor::ControlPanelReport, state::SharedState};
 
 pub struct MyRequestHandler {}
 
@@ -70,7 +71,7 @@ where
     led_4: Output<'static>,
     led_5: Output<'static>,
     writer: HidWriter<'static, D, 8>,
-    state: &'static crate::state::SharedState,
+    state: &'static Mutex<CriticalSectionRawMutex, SharedState>,
 }
 impl<D: Driver<'static>> JoystickRunner<D> {
     pub async fn run(&mut self) -> ! {
@@ -96,7 +97,7 @@ impl<D: Driver<'static>> JoystickRunner<D> {
             }
 
             // Update the LEDs.
-            if (*self.state.0.lock().await) {
+            if (*self.state.lock().await).power {
                 counter = counter.wrapping_add(1);
             } else {
                 counter = 0;
@@ -149,7 +150,7 @@ pub(crate) fn make_joystick<D>(
     pin_led3: impl Pin,
     pin_led4: impl Pin,
     pin_led5: impl Pin,
-    state: &'static crate::state::SharedState,
+    state: &'static Mutex<CriticalSectionRawMutex, SharedState>,
 ) -> (JoystickRunner<D>, HidResponderRunner<'static, D>)
 where
     D: Driver<'static>,

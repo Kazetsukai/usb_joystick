@@ -10,7 +10,7 @@ function debounce_leading(func, timeout = 300) {
   let timer;
   return (...args) => {
     if (!timer) {
-      func(...args);
+      return func(...args);
     }
     clearTimeout(timer);
     timer = setTimeout(() => {
@@ -25,7 +25,11 @@ document.addEventListener("DOMContentLoaded", function () {
   document.querySelector("#boolToggle").addEventListener(
     "click",
     debounce_leading(function () {
-      fetch("./toggle", { method: "POST" });
+      fetch("./toggle", { method: "POST" })
+        .then((a) => a.json())
+        .then((state) => {
+          document.querySelector("#boolToggle").checked = state;
+        });
       return false;
     })
   );

@@ -8,7 +8,7 @@ use picoserve::{
     AppRouter, AppWithStateBuilder, Config,
 };
 
-use crate::state::{AppState, SharedState};
+use crate::state::{AppState, SharedStateMutex};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const STYLE_CSS: &str = include_str!("../static/style.css");
@@ -17,9 +17,9 @@ const SCRIPT_JS: &str = include_str!("../static/script.js");
 pub struct AppProps;
 
 pub async fn get_state(
-    extract::State(SharedState(power)): extract::State<SharedState>,
+    extract::State(SharedStateMutex(shared)): extract::State<SharedStateMutex>,
 ) -> impl IntoResponse {
-    json::Json(*power.lock().await)
+    json::Json((*shared.lock().await).power)
 }
 
 impl AppWithStateBuilder for AppProps {
@@ -34,11 +34,13 @@ impl AppWithStateBuilder for AppProps {
             .route("/state", get(get_state))
             .route(
                 "/power",
-                post(|State(SharedState(power)): State<SharedState>| async {
-                    let mut guard = power.lock().await;
-                    *guard = !*guard;
-                    json::Json(*guard)
-                }),
+                post(
+                    |State(SharedStateMutex(shared)): State<SharedStateMutex>| async {
+                        let power = &mut shared.lock().await.power;
+                        *power = !*power;
+                        json::Json(*power)
+                    },
+                ),
             )
     }
 }
